@@ -291,3 +291,13 @@ func (r *RedisCLI) ClusterReplicate(nodeIP string, leaderID string) (string, err
 	}
 	return stdout, nil
 }
+
+// https://redis.io/commands/config-get
+func (r *RedisCLI) ConfigGet(nodeIP string, pattern string) ([]string, error) {
+	args := []string{"-h", nodeIP, "config", "get", pattern}
+	stdout, stderr, err := r.executeCommand(args)
+	if err != nil || strings.TrimSpace(stderr) != "" || IsError(strings.TrimSpace(stdout)) {
+		return nil, errors.Errorf("Failed to execute CONFIG GET (%s, %v): %s | %s | %v", nodeIP, pattern, stdout, stderr, err)
+	}
+	return NewRedisArray(stdout), nil
+}
