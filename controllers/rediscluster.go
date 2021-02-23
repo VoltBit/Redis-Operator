@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -446,7 +447,7 @@ func (r *RedisClusterReconciler) addFollowers(redisCluster *dbv1.RedisCluster, n
 
 // Removes all nodes the cluster node table entries with IDs of nodes not available
 // Recives the list of healthy cluster nodes (Redis is reachable and has cluster mode on)
-func (r *RedisClusterReconciler) forgetLostNodes(redisCluster *dbv1.RedisCluster) error {
+func (r *RedisClusterReconciler) bckforgetLostNodes(redisCluster *dbv1.RedisCluster) error {
 
 	clusterView, err := r.NewRedisClusterView(redisCluster)
 	if err != nil {
@@ -494,6 +495,93 @@ func (r *RedisClusterReconciler) forgetLostNodes(redisCluster *dbv1.RedisCluster
 	return nil
 }
 
+// Removes all nodes the cluster node table entries with IDs of nodes not available
+// Recives the list of healthy cluster nodes (Redis is reachable and has cluster mode on)
+func (r *RedisClusterReconciler) cleanClusterNodeTables(redisCluster *dbv1.RedisCluster) error {
+
+	clusterView, err := r.NewRedisClusterView(redisCluster)
+	if err != nil {
+		return err
+	}
+
+	nodeMap := make(map[string][]bool)
+
+	nodeIPs := clusterView.HealthyNodeIPs()
+	if len(nodeIPs) < redisCluster.Spec.LeaderCount*(redisCluster.Spec.LeaderFollowersCount+1) {
+		return errors.Errorf("Cleanup failed - at least one node is unhealthy")
+	}
+
+	clusterNodeTables, err := r.getClusterNodeTables(nodeIPs...)
+	if err != nil {
+		return err
+	}
+	r.Log.Info("Cleanning up cluster node tables...")
+
+	for _, nodeIP := range nodeIPs {
+		for i := range *clusterNodeTables[nodeIP] {
+			flags := nodeMap[(*clusterNodeTables[nodeIP])[i].ID]
+			flags = append(flags, (*clusterNodeTables[nodeIP])[i].IsFailing())
+			nodeMap[(*clusterNodeTables[nodeIP])[i].ID] = flags
+		}
+	}
+
+	r.Log.Info("Node map: ", nodeMap)
+
+	for nodeID, flags := range nodeMap {
+		for _, failed := range flags {
+			if failed {
+				r.forgetNode(nodeIPs, nodeID)
+			}
+		}
+	}
+
+	return nil
+}
+
+// Gets the cluster node table from one or more nodes
+// Returns a mapping between IPs and cluster nodes tables
+func (r *RedisClusterReconciler) getClusterNodeTables(nodeIPs ...string) (map[string]*rediscli.RedisClusterNodes, error) {
+	var wg sync.WaitGroup
+	errs := make(chan error, len(nodeIPs))
+	tables := make(chan struct {
+		Table *rediscli.RedisClusterNodes
+		IP    string
+	}, len(nodeIPs))
+
+	for i := range nodeIPs {
+		wg.Add(1)
+		go func(ip string, wg *sync.WaitGroup) {
+			defer wg.Done()
+			table, err := r.RedisCLI.ClusterNodes(ip)
+			if err != nil {
+				errs <- err
+			} else {
+				tables <- struct {
+					Table *rediscli.RedisClusterNodes
+					IP    string
+				}{table, ip}
+			}
+		}(nodeIPs[i], &wg)
+	}
+
+	wg.Wait()
+	close(errs)
+	close(tables)
+
+	for err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	tableMap := make(map[string]*rediscli.RedisClusterNodes, len(tables))
+	for table := range tables {
+		tableMap[table.IP] = table.Table
+	}
+
+	return tableMap, nil
+}
+
 // Removes a node from the cluster nodes table of all specified nodes
 // nodeIPs: 	list of active node IPs
 // removedID: ID of node to be removed
@@ -524,13 +612,22 @@ func (r *RedisClusterReconciler) forgetNode(nodeIPs []string, removedID string) 
 	return nil
 }
 
-func (r *RedisClusterReconciler) cleanupNodeList(podIPs []string) error {
+func (r *RedisClusterReconciler) cleanupNodeList(redisCluster *dbv1.RedisCluster) error {
 	var wg sync.WaitGroup
-	errs := make(chan error, len(podIPs))
 
-	r.Log.Info(fmt.Sprintf("Cleanning up: %v", podIPs))
+	r.Log.Info("Cleanning up node tables...")
 
-	for _, podIP := range podIPs {
+	clusterView, err := r.NewRedisClusterView(redisCluster)
+	if err != nil {
+		return err
+	}
+
+	podIPs := clusterView.HealthyNodeIPs()
+	if len(podIPs) < redisCluster.Spec.LeaderCount*(redisCluster.Spec.LeaderFollowersCount+1) {
+		return errors.Errorf("Cleanup failed - one or more nodes are not healthy")
+	}
+
+	for i := range podIPs {
 		wg.Add(1)
 		go func(ip string, wg *sync.WaitGroup) {
 			defer wg.Done()
@@ -543,22 +640,15 @@ func (r *RedisClusterReconciler) cleanupNodeList(podIPs []string) error {
 				if clusterNode.IsFailing() {
 					// TODO opportunity for higher concurrency - spawn a routine for each ClusterForget command
 					if _, err := r.RedisCLI.ClusterForget(ip, clusterNode.ID); err != nil {
-						errs <- err
-						return
+						r.Log.Info(fmt.Sprintf("[WARN] Could not clean table for ip %s: %v", ip, err))
 					}
 				}
 			}
-		}(podIP, &wg)
+		}(podIPs[i], &wg)
 	}
 
 	wg.Wait()
-	close(errs)
 
-	for err := range errs {
-		if err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -585,11 +675,11 @@ func (r *RedisClusterReconciler) handleFailedAutomaticFailover(leader *LeaderNod
 	return failoverPodIP
 }
 
-func (r *RedisClusterReconciler) getRedisClusterTimeout(nodeIPs ...string) (int, error) {
+func (r *RedisClusterReconciler) getClusterNodeTimeoutSetting(nodeIPs ...string) (int, error) {
 	for _, nodeIP := range nodeIPs {
 		setting, err := r.RedisCLI.ConfigGet(nodeIP, "cluster-node-timeout")
-		if err == nil && len(setting) == 2 {
-			timeout, convErr := strconv.Atoi(setting[1])
+		if err == nil && len(*setting) == 2 {
+			timeout, convErr := strconv.Atoi((*setting)["cluster-node-timeout"])
 			if convErr != nil {
 				continue
 			}
@@ -599,22 +689,38 @@ func (r *RedisClusterReconciler) getRedisClusterTimeout(nodeIPs ...string) (int,
 	return 0, nil
 }
 
+// Waits for NODE_TIMEOUT * FAIL_REPORT_VALIDITY_MULT
+// https://redis.io/topics/cluster-spec
+func (r *RedisClusterReconciler) waitForRedisFailDetection(ip string) error {
+	clusterNodeTimeout, err := r.getClusterNodeTimeoutSetting(ip)
+	if err != nil {
+		return err
+	}
+	waitTime := clusterNodeTimeout + int(clusterNodeTimeout/4)
+	r.Log.Info(fmt.Sprintf("Waiting %dms for Redis to detect the failure\n", waitTime))
+	time.Sleep(time.Millisecond * time.Duration(waitTime))
+	return nil
+}
+
 func (r *RedisClusterReconciler) recoverCluster(redisCluster *dbv1.RedisCluster) error {
 	clusterView, err := r.NewRedisClusterView(redisCluster)
 	if err != nil {
 		return err
 	}
 
+	// wait for Redis to flag the nodes as failed
 	r.Log.Info(clusterView.String())
 	for _, leader := range *clusterView {
 		if leader.Failed {
-			// wait for Redis to notice that the node is down
-			clusterNodeTimeout := r.getClusterNodeTimeout()
-			wait(clusterNodeTimeout)
 			if leader.Terminating {
 				if err = r.waitForPodDelete(*leader.Pod); err != nil {
 					return errors.Errorf("Failed to wait for leader pod to be deleted %s: %v", leader.NodeNumber, err)
 				}
+			}
+
+			err := r.waitForRedisFailDetection(clusterView.HealthyNodeIPs()[0])
+			if err != nil {
+				return err
 			}
 
 			failoverPodIP, err := r.waitForFailover(redisCluster, leader)
@@ -629,6 +735,7 @@ func (r *RedisClusterReconciler) recoverCluster(redisCluster *dbv1.RedisCluster)
 			// if err := r.forgetLostNodes(redisCluster); err != nil {
 			// 	return err
 			// }
+			// r.clean()
 
 			if err := r.recreateLeader(redisCluster, failoverPodIP); err != nil {
 				return err
@@ -660,12 +767,11 @@ func (r *RedisClusterReconciler) recoverCluster(redisCluster *dbv1.RedisCluster)
 			}
 
 			if len(missingFollowers) > 0 {
-				// wait for Redis to notice that the nodes are down
-				clusterNodeTimeout := r.getClusterNodeTimeout()
-				wait(clusterNodeTimeout)
-				// if err := r.forgetLostNodes(redisCluster); err != nil {
-				// 	return err
-				// }
+				err := r.waitForRedisFailDetection(clusterView.HealthyNodeIPs()[0])
+				if err != nil {
+					return err
+				}
+				// r.clean()
 				if err := r.addFollowers(redisCluster, missingFollowers...); err != nil {
 					return err
 				}
@@ -773,7 +879,10 @@ func (r *RedisClusterReconciler) updateCluster(redisCluster *dbv1.RedisCluster) 
 			}
 		}
 	}
-	if err = r.cleanupNodeList(clusterView.HealthyNodeIPs()); err != nil {
+	// if err = r.cleanupNodeList(clusterView.HealthyNodeIPs()); err != nil {
+	// 	return err
+	// }
+	if err = r.cleanClusterNodeTables(redisCluster); err != nil {
 		return err
 	}
 	return nil
