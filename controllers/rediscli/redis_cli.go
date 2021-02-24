@@ -23,7 +23,7 @@ func NewRedisCLI(log logr.Logger) *RedisCLI {
 }
 
 const (
-	defaultRedisCliTimeout = 20 * time.Second
+	defaultRedisCliTimeout = 240 * time.Second
 )
 
 /*
@@ -296,8 +296,10 @@ func (r *RedisCLI) ClusterReplicate(nodeIP string, leaderID string) (string, err
 func (r *RedisCLI) ConfigGet(nodeIP string, pattern string) (*RedisArray, error) {
 	args := []string{"-h", nodeIP, "config", "get", pattern}
 	stdout, stderr, err := r.executeCommand(args)
+	r.Log.Info(fmt.Sprintf("Sending stdout: %v | %v\n", stdout, stderr))
 	if err != nil || strings.TrimSpace(stderr) != "" || IsError(strings.TrimSpace(stdout)) {
 		return nil, errors.Errorf("Failed to execute CONFIG GET (%s, %v): %s | %s | %v", nodeIP, pattern, stdout, stderr, err)
 	}
+	r.Log.Info(fmt.Sprintf("Sending stdout: %v | %v\n", stdout, stderr))
 	return NewRedisArray(stdout), nil
 }

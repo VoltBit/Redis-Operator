@@ -289,25 +289,34 @@ func (r *RedisClusterReconciler) initializeCluster(redisCluster *dbv1.RedisClust
 	return r.waitForClusterCreate(nodeIPs)
 }
 
+func (r *RedisClusterReconciler) addFollower(redisCluster *dbv1.RedisCluster, followerIP string, leaderIP string, leaderID string) {
+
+}
+
 // Make a new Redis node join the cluster as a follower and wait until data sync is complete
 func (r *RedisClusterReconciler) replicateLeader(followerIP string, leaderIP string) error {
 	r.Log.Info(fmt.Sprintf("Replicating leader: %s->%s", followerIP, leaderIP))
+	time.Sleep(9999 * time.Second)
+	r.Log.Info("leader ID start")
 	leaderID, err := r.RedisCLI.MyClusterID(leaderIP)
 	if err != nil {
 		return err
 	}
 
+	r.Log.Info("follower ID start")
 	followerID, err := r.RedisCLI.MyClusterID(followerIP)
 	if err != nil {
 		return err
 	}
 
+	r.Log.Info(fmt.Sprintf("add follower start: %v %v %v", followerIP, leaderIP, leaderID))
 	if stdout, err := r.RedisCLI.AddFollower(followerIP, leaderIP, leaderID); err != nil {
 		if !strings.Contains(stdout, "All nodes agree about slots configuration") {
 			return err
 		}
 	}
 
+	r.Log.Info("meet start")
 	if err = r.waitForRedisMeet(leaderIP, followerIP); err != nil {
 		return err
 	}
@@ -528,10 +537,15 @@ func (r *RedisClusterReconciler) cleanClusterNodeTables(redisCluster *dbv1.Redis
 	r.Log.Info("Node map: ", nodeMap)
 
 	for nodeID, flags := range nodeMap {
+		forget := true
 		for _, failed := range flags {
-			if failed {
-				r.forgetNode(nodeIPs, nodeID)
+			if !failed {
+				forget = false
+				break
 			}
+		}
+		if forget {
+			r.forgetNode(nodeIPs, nodeID)
 		}
 	}
 
@@ -675,18 +689,19 @@ func (r *RedisClusterReconciler) handleFailedAutomaticFailover(leader *LeaderNod
 	return failoverPodIP
 }
 
-func (r *RedisClusterReconciler) getClusterNodeTimeoutSetting(nodeIPs ...string) (int, error) {
-	for _, nodeIP := range nodeIPs {
-		setting, err := r.RedisCLI.ConfigGet(nodeIP, "cluster-node-timeout")
-		if err == nil && len(*setting) == 2 {
-			timeout, convErr := strconv.Atoi((*setting)["cluster-node-timeout"])
-			if convErr != nil {
-				continue
-			}
-			return timeout, nil
+func (r *RedisClusterReconciler) getClusterNodeTimeoutSetting(nodeIP string) (int, error) {
+	setting, err := r.RedisCLI.ConfigGet(nodeIP, "cluster-node-timeout")
+	r.Log.Info(fmt.Sprintf("Result of config get: %v | %v", *setting, err))
+	if err == nil {
+		timeout, convErr := strconv.Atoi((*setting)["cluster-node-timeout"])
+		if convErr != nil {
+			time.Sleep(9999 * time.Second)
+			r.Log.Info("Fucked up: %v | %v\n", timeout, convErr)
+			return -1, convErr
 		}
+		return timeout, nil
 	}
-	return 0, nil
+	return -1, err
 }
 
 // Waits for NODE_TIMEOUT * FAIL_REPORT_VALIDITY_MULT
@@ -696,7 +711,8 @@ func (r *RedisClusterReconciler) waitForRedisFailDetection(ip string) error {
 	if err != nil {
 		return err
 	}
-	waitTime := clusterNodeTimeout + int(clusterNodeTimeout/4)
+	r.Log.Info(fmt.Sprintf("Setting: %d\n", clusterNodeTimeout))
+	waitTime := clusterNodeTimeout*4 + int(clusterNodeTimeout/4)
 	r.Log.Info(fmt.Sprintf("Waiting %dms for Redis to detect the failure\n", waitTime))
 	time.Sleep(time.Millisecond * time.Duration(waitTime))
 	return nil
@@ -732,10 +748,23 @@ func (r *RedisClusterReconciler) recoverCluster(redisCluster *dbv1.RedisCluster)
 				}
 			}
 
-			// if err := r.forgetLostNodes(redisCluster); err != nil {
+			// 			if err := r.bckforgetLostNodes(redisCluster); err != nil {
+			// 				return err
+			// 			}
+
+			// if err := r.cleanClusterNodeTables(redisCluster); err != nil {
 			// 	return err
 			// }
-			// r.clean()
+
+			if leader.Pod != nil && !leader.Terminating {
+				_, err := r.deletePodsByIP(redisCluster.Namespace, leader.Pod.Status.PodIP)
+				if err != nil {
+					return err
+				}
+				if err = r.waitForPodDelete(*leader.Pod); err != nil {
+					return err
+				}
+			}
 
 			if err := r.recreateLeader(redisCluster, failoverPodIP); err != nil {
 				return err
@@ -771,7 +800,14 @@ func (r *RedisClusterReconciler) recoverCluster(redisCluster *dbv1.RedisCluster)
 				if err != nil {
 					return err
 				}
-				// r.clean()
+
+				// if err := r.cleanClusterNodeTables(redisCluster); err != nil {
+				// 	return err
+				// }
+
+				// if err := r.bckforgetLostNodes(redisCluster); err != nil {
+				// 	return err
+				// }
 				if err := r.addFollowers(redisCluster, missingFollowers...); err != nil {
 					return err
 				}
@@ -781,6 +817,10 @@ func (r *RedisClusterReconciler) recoverCluster(redisCluster *dbv1.RedisCluster)
 	complete, err := r.isClusterComplete(redisCluster)
 	if err != nil || !complete {
 		return errors.Errorf("Cluster recovery not complete")
+	}
+
+	if err := r.cleanClusterNodeTables(redisCluster); err != nil {
+		return err
 	}
 	return nil
 }
