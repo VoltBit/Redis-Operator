@@ -1,4 +1,6 @@
 # PayU Redis Operator
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fvoltbit%2Fredis-operator.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fvoltbit%2Fredis-operator?ref=badge_shield)
+
 
 Kubernetes operator that creates and manages Redis HA clustered databases - [Redis docs](https://redislabs.com/redis-enterprise/technology/redis-enterprise-cluster-architecture/).
 
@@ -94,3 +96,7 @@ telepresence --mount /tmp/podtoken  --context kind-redis-test --namespace defaul
 While the image used for production and local deployment is optimised for size, the development image does not discard the environment tools and allows the operator controller binary to be compiled inside the container. The image uses the CompileDaemon Go module in the ENTRYPOINT to track the source files, compile and build the controller. Every time the source files change a build and run are triggered.
 
 The source code directory is mounted at `/app` and a special directory `/var/run/secrets` is used to load the permissions of the deployment that is being swapped. For more information check the Telepresence documentation [Link1](https://www.telepresence.io/tutorials/docker) & [Link2](https://www.telepresence.io/tutorials/kubernetes-client-libs).
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fvoltbit%2Fredis-operator.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fvoltbit%2Fredis-operator?ref=badge_large)
