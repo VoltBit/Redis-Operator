@@ -291,3 +291,23 @@ func (r *RedisCLI) ClusterReplicate(nodeIP string, leaderID string) (string, err
 	}
 	return stdout, nil
 }
+
+// https://redis.io/commands/acl-load
+func (r *RedisCLI) ACLLoad(nodeIP string) (string, error) {
+	args := []string{"-h", nodeIP, "acl", "load"}
+	stdout, stderr, err := r.executeCommand(args)
+	if err != nil || strings.TrimSpace(stderr) != "" || strings.TrimSpace(stdout) != "OK" {
+		return stdout, errors.Errorf("Failed to execute ACL LOAD (%s): %s | %s | %v", nodeIP, stdout, stderr, err)
+	}
+	return stdout, nil
+}
+
+// https://redis.io/commands/acl-list
+func (r *RedisCLI) ACLList(nodeIP string) (string, error) {
+	args := []string{"-h", nodeIP, "acl", "list"}
+	stdout, stderr, err := r.executeCommand(args)
+	if err != nil || strings.TrimSpace(stderr) != "" || IsError(strings.TrimSpace(stdout)) {
+		return stdout, errors.Errorf("Failed to execute ACL LIST (%s): %s | %s | %v", nodeIP, stdout, stderr, err)
+	}
+	return stdout, nil
+}
