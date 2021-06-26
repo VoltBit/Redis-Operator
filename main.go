@@ -55,18 +55,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := ctrl.Log.WithName("controllers").WithName("RedisCluster")
+	rdcLogger := ctrl.Log.WithName("controllers").WithName("RedisCluster")
+	configLogger := ctrl.Log.WithName("controllers").WithName("RedisConfig")
 
 	if err = (&controllers.RedisClusterReconciler{
 		Client:   mgr.GetClient(),
-		Log:      log,
+		Log:      configLogger,
 		Scheme:   mgr.GetScheme(),
-		RedisCLI: rediscli.NewRedisCLI(log),
+		RedisCLI: rediscli.NewRedisCLI(configLogger),
 		State:    controllers.NotExists,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RedisCluster")
 		os.Exit(1)
 	}
+
+	if err = (&controllers.RedisClusterReconciler{
+		Client:   mgr.GetClient(),
+		Log:      rdcLogger,
+		Scheme:   mgr.GetScheme(),
+		RedisCLI: rediscli.NewRedisCLI(rdcLogger),
+		State:    controllers.NotExists,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RedisCluster")
+		os.Exit(1)
+	}
+
 	// +kubebuilder:scaffold:builder
 
 	setupLog.Info("starting manager")
