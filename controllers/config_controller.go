@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 
 	rediscli "github.com/PayU/redis-operator/controllers/rediscli"
 	"github.com/go-logr/logr"
@@ -9,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 )
 
 /*
@@ -34,8 +36,10 @@ type RedisConfigReconciler struct {
 	Log      logr.Logger
 	Scheme   *runtime.Scheme
 	RedisCLI *rediscli.RedisCLI
-	State    RedisClusterState
 }
+
+//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=configmaps/status,verbs=get;update;patch
 
 /*
 	What needs to happen:
@@ -54,14 +58,23 @@ type RedisConfigReconciler struct {
 const redisConfigLabelKey string = "redis-cluster"
 
 func (r *RedisConfigReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
-	log := r.Log.WithValues("redis-configs", req.NamespacedName)
 	var configMaps corev1.ConfigMapList
+
+	r.Log.Info("Running config reconcile")
+	r.Log.Info(fmt.Sprintf("Request: %+v", req))
+
+	// r.Log.Info(fmt.Sprintf("Redis label: %s", req.Name))
 	if err := r.List(context.Background(), &configMaps, client.InNamespace(req.Namespace), client.MatchingLabels{redisConfigLabelKey: req.Name}); err != nil {
-		log.Error(err, "Failed to fetch configmaps")
+		r.Log.Error(err, "Failed to fetch configmaps")
 	}
+
+	r.Log.Info(fmt.Sprintf("List of maps: %+v", len(configMaps.Items)))
 	return ctrl.Result{}, nil
 }
 
 func (r *RedisConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).For(&corev1.ConfigMap{}).Complete(r)
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.ConfigMap{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
+		Complete(r)
 }

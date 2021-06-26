@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -15,6 +16,14 @@ import (
 	"github.com/PayU/redis-operator/controllers/rediscli"
 	// +kubebuilder:scaffold:imports
 )
+
+var scheme = runtime.NewScheme()
+
+func init() {
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = dbv1.AddToScheme(scheme)
+	// +kubebuilder:scaffold:scheme
+}
 
 func main() {
 	var metricsAddr, namespace, enableLeaderElection, devmode string
@@ -30,16 +39,7 @@ func main() {
 	setupLogger := zap.New(zap.UseDevMode(devmode == "true")).WithName("setup")
 	// ctrl.SetLogger(setupLogger)
 
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		setupLogger.Error(err, "failed to add new scheme")
-		os.Exit(1)
-	}
-	if err := dbv1.AddToScheme(scheme); err != nil {
-		setupLogger.Error(err, "failed to add RedisCluster CRD to scheme")
-		os.Exit(1)
-	}
-	// +kubebuilder:scaffold:scheme
+	retryLockDuration := 4 * time.Second
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:             scheme,
@@ -48,6 +48,7 @@ func main() {
 		Port:               9443,
 		LeaderElection:     enableLeaderElection == "true",
 		LeaderElectionID:   "1747e98e.payu.com",
+		RetryPeriod:        &retryLockDuration,
 	})
 	if err != nil {
 		setupLogger.Error(err, "failed to create new manager")
@@ -65,7 +66,7 @@ func main() {
 		Client:   mgr.GetClient(),
 		Log:      rdcLogger,
 		Scheme:   mgr.GetScheme(),
-		RedisCLI: rediscli.NewRedisCLI(configLogger),
+		RedisCLI: rediscli.NewRedisCLI(rdcLogger),
 		State:    controllers.NotExists,
 	}).SetupWithManager(mgr); err != nil {
 		setupLogger.Error(err, "unable to create controller", "controller", "RedisCluster")
@@ -76,8 +77,7 @@ func main() {
 		Client:   mgr.GetClient(),
 		Log:      configLogger,
 		Scheme:   mgr.GetScheme(),
-		RedisCLI: rediscli.NewRedisCLI(rdcLogger),
-		State:    controllers.NotExists,
+		RedisCLI: rediscli.NewRedisCLI(configLogger),
 	}).SetupWithManager(mgr); err != nil {
 		setupLogger.Error(err, "unable to create controller", "controller", "RedisConfig")
 		os.Exit(1)
