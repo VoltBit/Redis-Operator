@@ -16,31 +16,30 @@ import (
 	// +kubebuilder:scaffold:imports
 )
 
-var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
-)
-
-func init() {
-	_ = clientgoscheme.AddToScheme(scheme)
-
-	_ = dbv1.AddToScheme(scheme)
-	// +kubebuilder:scaffold:scheme
-}
-
-// used in zap logger in order to configure settings
-func loggerOptions(*zap.Options) {}
-
 func main() {
-	var metricsAddr, namespace, enableLeaderElection string
+	var metricsAddr, namespace, enableLeaderElection, devmode string
+
 	flag.StringVar(&metricsAddr, "metrics-addr", "0.0.0.0:9808", "The address the metric endpoint binds to.")
 	flag.StringVar(&namespace, "namespace", "default", "The namespace the operator will manage.")
+	flag.StringVar(&devmode, "devmode", "false", "Development mode toggle.")
 	flag.StringVar(&enableLeaderElection, "enable-leader-election", "true",
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(loggerOptions))
+	setupLogger := zap.New(zap.UseDevMode(devmode == "true")).WithName("setup")
+	// ctrl.SetLogger(setupLogger)
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		setupLogger.Error(err, "failed to add new scheme")
+		os.Exit(1)
+	}
+	if err := dbv1.AddToScheme(scheme); err != nil {
+		setupLogger.Error(err, "failed to add RedisCluster CRD to scheme")
+		os.Exit(1)
+	}
+	// +kubebuilder:scaffold:scheme
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:             scheme,
@@ -51,40 +50,44 @@ func main() {
 		LeaderElectionID:   "1747e98e.payu.com",
 	})
 	if err != nil {
-		setupLog.Error(err, "unable to start manager")
+		setupLogger.Error(err, "failed to create new manager")
 		os.Exit(1)
 	}
 
-	rdcLogger := ctrl.Log.WithName("controllers").WithName("RedisCluster")
-	configLogger := ctrl.Log.WithName("controllers").WithName("RedisConfig")
-
-	if err = (&controllers.RedisClusterReconciler{
-		Client:   mgr.GetClient(),
-		Log:      configLogger,
-		Scheme:   mgr.GetScheme(),
-		RedisCLI: rediscli.NewRedisCLI(configLogger),
-		State:    controllers.NotExists,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "RedisCluster")
-		os.Exit(1)
-	}
+	rdcLogger := zap.New(zap.UseDevMode(devmode == "true")).
+		WithName("controllers").
+		WithName("RedisCluster")
+	configLogger := zap.New(zap.UseDevMode(devmode == "true")).
+		WithName("controllers").
+		WithName("RedisConfig")
 
 	if err = (&controllers.RedisClusterReconciler{
 		Client:   mgr.GetClient(),
 		Log:      rdcLogger,
 		Scheme:   mgr.GetScheme(),
+		RedisCLI: rediscli.NewRedisCLI(configLogger),
+		State:    controllers.NotExists,
+	}).SetupWithManager(mgr); err != nil {
+		setupLogger.Error(err, "unable to create controller", "controller", "RedisCluster")
+		os.Exit(1)
+	}
+
+	if err = (&controllers.RedisConfigReconciler{
+		Client:   mgr.GetClient(),
+		Log:      configLogger,
+		Scheme:   mgr.GetScheme(),
 		RedisCLI: rediscli.NewRedisCLI(rdcLogger),
 		State:    controllers.NotExists,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "RedisCluster")
+		setupLogger.Error(err, "unable to create controller", "controller", "RedisConfig")
 		os.Exit(1)
 	}
 
 	// +kubebuilder:scaffold:builder
 
-	setupLog.Info("starting manager")
+	setupLogger.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "problem running manager")
+		setupLogger.Error(err, "failed to start the manager")
 		os.Exit(1)
 	}
 }

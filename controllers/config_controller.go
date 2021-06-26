@@ -3,8 +3,10 @@ package controllers
 import (
 	"context"
 
+	rediscli "github.com/PayU/redis-operator/controllers/rediscli"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -27,9 +29,12 @@ import (
 	https://redis.io/topics/acl
 */
 
-type RedisConfigController struct {
+type RedisConfigReconciler struct {
 	client.Client
-	Log logr.Logger
+	Log      logr.Logger
+	Scheme   *runtime.Scheme
+	RedisCLI *rediscli.RedisCLI
+	State    RedisClusterState
 }
 
 /*
@@ -48,7 +53,7 @@ type RedisConfigController struct {
 
 const redisConfigLabelKey string = "redis-cluster"
 
-func (r *RedisConfigController) Reconcile(req ctrl.Request) (ctrl.Result, error) {
+func (r *RedisConfigReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("redis-configs", req.NamespacedName)
 	var configMaps corev1.ConfigMapList
 	if err := r.List(context.Background(), &configMaps, client.InNamespace(req.Namespace), client.MatchingLabels{redisConfigLabelKey: req.Name}); err != nil {
@@ -57,6 +62,6 @@ func (r *RedisConfigController) Reconcile(req ctrl.Request) (ctrl.Result, error)
 	return ctrl.Result{}, nil
 }
 
-func (r *RedisConfigController) SetupWithManager(mgr ctrl.Manager) error {
+func (r *RedisConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).For(&corev1.ConfigMap{}).Complete(r)
 }
